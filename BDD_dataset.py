@@ -180,4 +180,4 @@ if __name__ == "__main__":
             output_dict = output_list[0]
             print("pass: {:.3f}s".format(time.time() - tic))
 
-        vis_bbox(input_image, output_dict, BDD_INSTANCE_CATEGORY_NAMES, max_vis=20, prob_thres=0.5)  # for 2 epoch for nms
+        vis_bbox(input_image, output_dict, BDD_INSTANCE_CATEGORY_NAMES, max_vis=20, prob_thres=0.5)  

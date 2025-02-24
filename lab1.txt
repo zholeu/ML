@@ -1,0 +1,154 @@
+    LR = 0.001
+    num_classes = 11
+    batch_size = 4
+    start_epoch, max_epoch = 0, 2
+    base_dir = os.path.join(BASE_DIR2)
+    train_transform = Compose([ToTensor(), RandomHorizontalFlip(0.5)])
+    writer = SummaryWriter("runs/experiment_1")
+    torch.cuda.empty_cache()
+
+    # step 1: data
+    train_set = bddDataset(data_dir=base_dir, transforms=train_transform, flag='train', label_list=BDD_INSTANCE_CATEGORY_NAMES)
+    val_set = bddDataset(data_dir=base_dir, transforms=train_transform, flag='val', label_list=BDD_INSTANCE_CATEGORY_NAMES)
+    # print(f"Length of train_set: {len(train_set)}")
+
+    def collate_fn(batch):
+        return tuple(zip(*batch))
+
+    train_loader = DataLoader(train_set, batch_size=batch_size, collate_fn=collate_fn, shuffle=true)
+    val_loader = DataLoader(val_set, batch_size=batch_size, collate_fn=collate_fn, shuffle=true)
+
+    # step 2: model
+    model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
+    in_features = model.roi_heads.box_predictor.cls_score.in_features
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes) # replace the pre-trained head with a new one
+
+    print(device)
+    model.to(device)
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.SGD(params, lr=LR, momentum=0.9, weight_decay=0.0005)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+    training_losses = []
+    losses_per_epoch = []
+    accuracy_per_epoch = []
+    prune_amount = 0.2  # Сколько весов занулить
+    prune_interval = 1  # Раз в сколько эпох делать прунинг
+
+    for epoch in range(start_epoch, max_epoch):
+        model.train()
+        total_loss = 0.0  # Sum of losses for the epoch
+        num_batches = 0  # Count of batches processed
+
+        total_correct = 0  # Correct detections
+        total_instances = 0  # Total ground truth instances
+        try:
+            for iter, (images, targets) in enumerate(train_loader):
+                if iter > 150:
+                    break
+                images = list(image.to(device) for image in images)
+                targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
+                train_loss_dict = model(images, targets)  # images is list; targets is [ dict["boxes":**, "labels":**], dict[] ]
+                losses = sum(loss for loss in train_loss_dict.values())
+                print("Training:Epoch[{:0>3}/{:0>3}] Iteration[{:0>3}/{:0>3}] Loss: {:.4f} ".format(epoch, max_epoch, iter + 1, len(train_loader), losses.item()))
+                # Calculate accuracy (IoU-based or simply matching boxes and labels)
+
+                optimizer.zero_grad()
+                losses.backward()
+                optimizer.step()
+                total_loss += losses.item()
+                num_batches += 1
+
+                # Get Predictions Separately
+                model.eval()
+                with torch.no_grad():
+                    predictions = model(images)  # List of dicts [{'boxes':..., 'labels':..., 'scores':...}]
+
+                model.train()
+
+                # Accuracy Calculation using IoU
+                for target, prediction in zip(targets, predictions):
+                    gt_boxes = target['boxes'].cpu()
+                    pred_boxes = prediction['boxes'].cpu()
+
+                    correct = sum(
+                        1 for _ in filter(lambda iou: iou >= 0.5, [compute_iou([gt], pred_boxes) for gt in gt_boxes]))
+
+                    total_correct += correct
+                    total_instances += len(gt_boxes)
+        except IndexError:
+                print("pass")
+                pass
+
+            # writer.add_scalar("Loss/train", losses.item(), iter + epoch * len(train_loader))
+        avg_loss = total_loss / num_batches
+        losses_per_epoch.append(avg_loss)  # Save the avg loss
+        # Calculate accuracy for the epoch
+        accuracy = total_correct / total_instances if total_instances > 0 else 0
+        accuracy_per_epoch.append(accuracy)  # Save accuracy for the epoch
+
+        writer.add_scalar("Loss/Train", avg_loss, epoch)  # Log loss to TensorBoard
+        writer.add_scalar("Accuracy/Train", accuracy, epoch)  # Log accuracy to TensorBoard
+
+        # Прунинг через каждые prune_interval эпох
+        # if epoch % prune_interval == 0 and epoch > 0:
+        # apply_l2_pruning(model, amount=prune_amount)
+        # print(f"Applied L2 pruning at epoch {epoch}")
+
+        lr_scheduler.step()
+
+        torch.save(model, 'models/{}_1model.pth.tar'.format(epoch+1))
+        # Export the model to ONNX after each epoch
+        onnx_model_path = 'onx/{}_1faster_rcnn_epoch.onnx'.format(epoch+1)
+        export_model_to_onnx(model, onnx_model_path, device)
+        # torch.cuda.empty_cache()
+
+    writer.close()
+    plt.figure(figsize=(8, 6))
+    plt.plot(range(1, max_epoch + 1), losses_per_epoch,  linestyle='-')
+    plt.xlabel('Epoch')
+    plt.ylabel('Average Loss')
+    plt.title('Training Loss Over Epochs')
+    plt.grid(True)
+    plt.show()
+
+    plt.figure(figsize=(8, 6))
+    plt.plot(range(1, max_epoch + 1), accuracy_per_epoch,  linestyle='-', label='Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.title('Training Accuracy Over Epochs')
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+    # test
+    model.eval()
+
+    # # config
+    vis_num = 3
+    vis_dir = os.path.join(BASE_DIR2, "images", '100k', 'test')
+    img_names = list(filter(lambda x: x.endswith(".jpg"), os.listdir(vis_dir)))
+    random.shuffle(img_names)
+    preprocess = transforms.Compose([transforms.ToTensor(), ])
+
+    for i in range(0, vis_num):
+
+        path_img = os.path.join(vis_dir, img_names[i])
+        # preprocess
+        input_image = Image.open(path_img).convert("RGB")
+        img_chw = preprocess(input_image)
+
+        # to device
+        if torch.cuda.is_available():
+            img_chw = img_chw.to('cuda')
+            model.to('cuda')
+
+        # forward
+        input_list = [img_chw]
+        with torch.no_grad():
+            tic = time.time()
+            print("input img tensor shape:{}".format(input_list[0].shape))
+            output_list = model(input_list)
+            output_dict = output_list[0]
+            print("pass: {:.3f}s".format(time.time() - tic))
+
+        # visualization
+        vis_bbox(input_image, output_dict, BDD_INSTANCE_CATEGORY_NAMES, max_vis=20, prob_thres=0.5)  # for 2 epoch for nms

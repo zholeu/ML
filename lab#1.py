@@ -14,15 +14,16 @@ from matplotlib import pyplot as plt
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.transforms import functional as F
 
-random.seed(1) 
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 device = torch.device("cuda")
+
+# Список классов объектов, в нашем датасете их 11, которые модель будет детектить
 BDD_INSTANCE_CATEGORY_NAMES = [
     '__background__', 'bus', 'traffic light', 'traffic sign',
     'person', 'bike', 'truck', 'motor', 'car', 'train', 'rider'
 ]
 
+# Функция для визуализации предсказанных bounding box
 def vis_bbox(img, output, classes, max_vis=40, prob_thres=0.4):
     fig, ax = plt.subplots(figsize=(12, 12))
     ax.imshow(img, aspect='equal')
@@ -40,7 +41,7 @@ def vis_bbox(img, output, classes, max_vis=40, prob_thres=0.4):
 
         if score < prob_thres:
             continue
-
+        # Рисуем рамку и подписываем объект
         ax.add_patch(plt.Rectangle((bbox[0], bbox[1]), bbox[2] - bbox[0], bbox[3] - bbox[1], fill=False,
                                    edgecolor='red', linewidth=3.5))
         ax.text(bbox[0], bbox[1] - 2, '{:s} {:.3f}'.format(class_name, score), bbox=dict(facecolor='blue', alpha=0.5),
@@ -48,7 +49,7 @@ def vis_bbox(img, output, classes, max_vis=40, prob_thres=0.4):
     plt.show()
     plt.close()
 
-
+# Класс объединяет несколько трансформаций
 class Compose(object):
     def __init__(self, transforms):
         self.transforms = transforms
@@ -58,7 +59,7 @@ class Compose(object):
             image, target = t(image, target)
         return image, target
 
-
+# Класс для случайного горизонтального отражения изображения
 class RandomHorizontalFlip(object):
     def __init__(self, prob):
         self.prob = prob
@@ -66,18 +67,19 @@ class RandomHorizontalFlip(object):
     def __call__(self, image, target):
         if random.random() < self.prob:
             height, width = image.shape[-2:]
-            image = image.flip(-1)
+            image = image.flip(-1)  # Отражаем изображение по горизонтали
             bbox = target["boxes"]
-            bbox[:, [0, 2]] = width - bbox[:, [2, 0]]
+            bbox[:, [0, 2]] = width - bbox[:, [2, 0]] # Корректируем координаты рамок
             target["boxes"] = bbox
         return image, target
 
-
+# Класс изображения -> тензор
 class ToTensor(object):
     def __call__(self, image, target):
-        image = F.to_tensor(image)
+        image = F.to_tensor(image) # изображение -> формат тензора
         return image, target
-
+        
+# Подготавливаем данные (загрузчик)
 def prepare_data(base_dir, train_transform, batch_size):
     train_set = bddDataset(data_dir=base_dir, transforms=train_transform, flag='train', label_list=BDD_INSTANCE_CATEGORY_NAMES)
     val_set = bddDataset(data_dir=base_dir, transforms=train_transform, flag='val', label_list=BDD_INSTANCE_CATEGORY_NAMES)
@@ -89,16 +91,18 @@ def prepare_data(base_dir, train_transform, batch_size):
     val_loader = DataLoader(val_set, batch_size=batch_size, collate_fn=collate_fn, shuffle=True)
     
     return train_loader, val_loader
-
+    
+# Функция создания модели Faster R-CNN с заменой классификатора
 def build_model(num_classes, device):
     model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
     in_features = model.roi_heads.box_predictor.cls_score.in_features
-    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)
+    model.roi_heads.box_predictor = FastRCNNPredictor(in_features, num_classes)  # Меняем классификатор на новый
     
     model.to(device)
     
     return model
-
+    
+# Обучаем
 def train(model, train_loader, optimizer, lr_scheduler, device, max_epoch, writer, prune_amount):
     losses_per_epoch = []
     accuracy_per_epoch = []
@@ -112,9 +116,8 @@ def train(model, train_loader, optimizer, lr_scheduler, device, max_epoch, write
 
         try:
             for iter, (images, targets) in enumerate(train_loader):
-                if iter > 300:
+                if iter > 300: # Ограничение числа итераций для уменьшения времени обучения, так как датасет большой а наших выч.мощностей не всегда хватает
                     break
-                
                 images = [image.to(device) for image in images]
                 targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
                 train_loss_dict = model(images, targets)
@@ -139,7 +142,7 @@ def train(model, train_loader, optimizer, lr_scheduler, device, max_epoch, write
 
                     total_correct += correct
                     total_instances += len(gt_boxes)
-
+# может произойти если оперативная память маленькая, поэтому для того чтобы прогресс сохранялся был добавлен данный exception
         except IndexError:
             print("pass")
             pass
@@ -185,7 +188,14 @@ def evaluate(model, val_loader, device):
 
     accuracy = total_correct / total_instances if total_instances > 0 else 0
     return accuracy
-
+    
+# Функция тестирования гипотезы
+# Гиперпараметры, которые настраивались:
+#     Learning Rate (lr) - скорость обучения
+#     Batch Size (batch_size) - размер мини-пакета
+#     Number of Epochs (num_epochs) - количество эпох
+#     Pruning Amount (prune_amount) - степень pruning весов(обрезки)
+#     step_size для lr_scheduler - шаг для уменьшения скорости обучения
 def test_hypothesis(train_function, base_dir, device, num_classes, batch_size, num_epochs, lr, prune_amount, writer):
     
     train_transform = Compose([ToTensor(), RandomHorizontalFlip(0.5)])

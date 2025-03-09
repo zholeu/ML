@@ -163,7 +163,7 @@ def train(model, train_loader, optimizer, lr_scheduler, device, max_epoch, write
         lr_scheduler.step()
     
     return losses_per_epoch, accuracy_per_epoch
-
+# вычисляет точность модели на валидационном датасете с использованием метрики IoU
 def evaluate(model, val_loader, device):
     model.eval()
     total_correct = 0
